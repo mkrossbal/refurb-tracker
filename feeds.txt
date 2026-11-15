@@ -1,0 +1,5 @@
+# One RSS/Atom feed URL per line. Lines starting with # are ignored.
+# Build filtered feeds at https://refurb-tracker.com/ ("Matching alert RSS/Atom feed URL").
+
+# 14" MacBook Pro, M5 Pro, 20-core, 64GB, 1TB
+https://refurb-tracker.com/feeds/us_in_macbookpro_macbookair.xml?filter=14%2064gb%20m5%20pro%201tb%2020-core

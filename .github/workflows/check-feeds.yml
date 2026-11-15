@@ -1,0 +1,35 @@
+name: Check feeds
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"  # GitHub may delay scheduled runs by a few minutes
+  workflow_dispatch:
+
+concurrency:
+  group: check-feeds
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # state.json remembers which items were already sent. Each run saves a
+      # new cache entry and restores the most recent one.
+      - uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: feed-state-${{ github.run_id }}
+          restore-keys: feed-state-
+
+      - run: python3 rss_telegram.py
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: state.json
+          key: feed-state-${{ github.run_id }}
