@@ -22,11 +22,13 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 
 ATOM = "{http://www.w3.org/2005/Atom}"
 USER_AGENT = "rss-telegram-tracker/1.0"
 MAX_SEEN_PER_FEED = 500
 MAX_PARALLEL_DOWNLOADS = 4
+FEED_TIMEOUT = 10  # seconds to wait for all feeds before giving up
 
 # Try IPv4 addresses before IPv6. On some home networks IPv6 connections to
 # Telegram hang until the timeout, delaying every message by up to a minute.
@@ -40,7 +42,7 @@ def _getaddrinfo_ipv4_first(*args, **kwargs):
 socket.getaddrinfo = _getaddrinfo_ipv4_first
 
 
-def http_get(url, timeout=30):
+def http_get(url, timeout=FEED_TIMEOUT):
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read()
@@ -183,21 +185,44 @@ def run_once(feeds, state_path, token, chat_id, seed, dry_run):
     state = load_state(state_path)
     results = []
     # Download all feeds at once, then process them one at a time so state
-    # updates and notifications stay sequential.
-    with ThreadPoolExecutor(max_workers=MAX_PARALLEL_DOWNLOADS) as pool:
-        downloads = [(url, pool.submit(http_get, url)) for url in feeds]
+    # updates and notifications stay sequential. Feeds that haven't arrived
+    # within FEED_TIMEOUT seconds in total are reported as errors.
+    pool = ThreadPoolExecutor(max_workers=MAX_PARALLEL_DOWNLOADS)
+    downloads = [(url, pool.submit(http_get, url)) for url in feeds]
+    deadline = time.time() + FEED_TIMEOUT
+    try:
         for url, download in downloads:
             try:
-                entries, new = check_feed(url, state, token, chat_id, seed=seed, dry_run=dry_run,
-                                          data=download.result())
+                data = download.result(timeout=max(0, deadline - time.time()))
+                entries, new = check_feed(url, state, token, chat_id, seed=seed, dry_run=dry_run, data=data)
                 results.append((url, entries, new, None))
             except Exception as e:  # keep going with other feeds
-                results.append((url, [], 0, e))
-                print("error checking %s: %s" % (url, e), file=sys.stderr)
+                error = describe_error(e)
+                results.append((url, [], 0, error))
+                print("error checking %s: %s" % (url, error), file=sys.stderr)
             finally:
                 if not dry_run:
                     save_state(state_path, state)
+    finally:
+        pool.shutdown(wait=False)  # don't wait for downloads we gave up on
     return results
+
+
+def describe_error(e):
+    """Turn a download or parse failure into a short, readable message."""
+    if isinstance(e, urllib.error.URLError) and not isinstance(e, urllib.error.HTTPError):
+        e = e.reason if isinstance(e.reason, Exception) else e
+    if isinstance(e, (FutureTimeout, socket.timeout)):
+        return "Site didn't respond within %d seconds" % FEED_TIMEOUT
+    if isinstance(e, urllib.error.HTTPError):
+        return "Site returned an error (HTTP %d)" % e.code
+    if isinstance(e, urllib.error.URLError):
+        return "Couldn't reach the site (%s)" % e.reason
+    if isinstance(e, OSError):  # DNS failure, connection refused, network down
+        return "Couldn't reach the site (%s)" % (e.strerror or e)
+    if isinstance(e, ET.ParseError):
+        return "Site returned something that isn't a valid feed"
+    return str(e) or type(e).__name__
 
 
 def feed_label(url):
