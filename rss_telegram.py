@@ -17,7 +17,6 @@ import os
 import re
 import socket
 import sys
-import threading
 import time
 import urllib.parse
 import urllib.request
@@ -232,13 +231,6 @@ def format_report(results):
     return text
 
 
-def send_typing(token, chat_id):
-    try:
-        telegram(token, "sendChatAction", {"chat_id": chat_id, "action": "typing"})
-    except Exception as e:
-        print("error sending typing indicator: %s" % e, file=sys.stderr)
-
-
 BOT_HELP = ("I check your feeds every %d minutes and message you when something new shows up.\n\n"
             "/check - check all feeds now and show what's listed (\"check\" works too)")
 
@@ -279,8 +271,6 @@ def run_bot(get_feeds, state_path, token, chat_id, interval):
             words = text.split()
             command = words[0].split("@")[0].lower().lstrip("/") if words else ""
             if command == "check":
-                # Show "typing…" while checking; sent in the background so it doesn't add delay.
-                threading.Thread(target=send_typing, args=(token, chat_id), daemon=True).start()
                 results = run_once(get_feeds(), state_path, token, chat_id, False, False)
                 reply = format_report(results)
                 next_check = time.time() + interval
