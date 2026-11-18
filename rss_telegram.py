@@ -74,12 +74,12 @@ def html_to_text(s):
     return "\n".join(l for l in lines if l and not l.startswith("Product page on"))
 
 
-def telegram(token, method, params):
+def telegram(token, method, params, timeout=30):
     url = "https://api.telegram.org/bot%s/%s" % (token, method)
     body = urllib.parse.urlencode(params).encode()
     req = urllib.request.Request(url, data=body, headers={"User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.load(resp)
     except urllib.error.HTTPError as e:
         raise RuntimeError("Telegram %s failed: %s" % (method, e.read().decode(errors="replace")))
@@ -160,22 +160,104 @@ def check_feed(url, state, token, chat_id, seed=False, dry_run=False):
 
     state[url] = seen[-MAX_SEEN_PER_FEED:]
     print("%s %s: %d entries, %d new" % (time.strftime("%Y-%m-%d %H:%M"), url, len(entries), len(new)))
-    return len(new)
+    return entries, len(new)
 
 
 def run_once(feeds, state_path, token, chat_id, seed, dry_run):
+    """Check every feed. Returns a list of (url, entries, new_count, error)."""
     state = load_state(state_path)
-    errors = 0
+    results = []
     for url in feeds:
         try:
-            check_feed(url, state, token, chat_id, seed=seed, dry_run=dry_run)
+            entries, new = check_feed(url, state, token, chat_id, seed=seed, dry_run=dry_run)
+            results.append((url, entries, new, None))
         except Exception as e:  # keep going with other feeds
-            errors += 1
+            results.append((url, [], 0, e))
             print("error checking %s: %s" % (url, e), file=sys.stderr)
         finally:
             if not dry_run:
                 save_state(state_path, state)
-    return errors
+    return results
+
+
+def feed_label(url):
+    """Short name for a feed: its ?filter= value if it has one, else the URL."""
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    return query.get("filter", [url])[0]
+
+
+def format_report(results):
+    esc = html.escape
+    lines = ["🔎 <b>Checked %d feed%s</b> at %s" % (
+        len(results), "" if len(results) == 1 else "s", time.strftime("%H:%M"))]
+    for url, entries, new, error in results:
+        label = esc(feed_label(url))
+        if error:
+            lines.append("\n⚠️ <b>%s</b>\nError: %s" % (label, esc(str(error)[:200])))
+        elif not entries:
+            lines.append("\n❌ <b>%s</b>\nNo matching listings" % label)
+        else:
+            lines.append("\n✅ <b>%s</b>\n%d listing%s, %d new" % (
+                label, len(entries), "" if len(entries) == 1 else "s", new))
+            for e in entries[:5]:
+                lines.append('• <a href="%s">%s</a>' % (esc(e["link"], quote=True), esc(e["title"].replace("Refurbished ", "", 1))))
+            if len(entries) > 5:
+                lines.append("…and %d more" % (len(entries) - 5))
+    text = ""
+    for line in lines:  # Telegram messages max out at 4096 characters
+        if len(text) + len(line) > 4000:
+            break
+        text += line + "\n"
+    return text
+
+
+BOT_HELP = ("I check your feeds every %d minutes and message you when something new shows up.\n\n"
+            "/check - check all feeds now and show what's listed")
+
+
+def run_bot(get_feeds, state_path, token, chat_id, interval):
+    """Stay running: check feeds every `interval` seconds and answer /check."""
+    telegram(token, "setMyCommands", {"commands": json.dumps(
+        [{"command": "check", "description": "Check feeds now"},
+         {"command": "help", "description": "What this bot does"}])})
+    print("%s bot started, checking every %ds" % (time.strftime("%Y-%m-%d %H:%M"), interval))
+    offset = None
+    next_check = 0
+    while True:
+        if time.time() >= next_check:
+            run_once(get_feeds(), state_path, token, chat_id, False, False)
+            next_check = time.time() + interval
+
+        # Long-poll for messages until the next scheduled check is due.
+        wait = int(max(1, min(50, next_check - time.time())))
+        params = {"timeout": wait, "allowed_updates": json.dumps(["message"])}
+        if offset:
+            params["offset"] = offset
+        try:
+            updates = telegram(token, "getUpdates", params, timeout=wait + 15).get("result", [])
+        except Exception as e:
+            print("error polling Telegram: %s" % e, file=sys.stderr)
+            time.sleep(15)
+            continue
+
+        for u in updates:
+            offset = u["update_id"] + 1
+            msg = u.get("message") or {}
+            if str(msg.get("chat", {}).get("id")) != str(chat_id):
+                continue  # only take commands from the configured chat
+            words = (msg.get("text") or "").split()
+            command = words[0].split("@")[0].lower() if words else ""
+            if command == "/check":
+                print("%s /check requested" % time.strftime("%Y-%m-%d %H:%M"))
+                results = run_once(get_feeds(), state_path, token, chat_id, False, False)
+                reply = format_report(results)
+                next_check = time.time() + interval
+            elif command in ("/start", "/help"):
+                reply = BOT_HELP % (interval // 60)
+            else:
+                continue
+            telegram(token, "sendMessage", {"chat_id": chat_id, "text": reply, "parse_mode": "HTML",
+                                            "disable_web_page_preview": "true"})
 
 
 def get_chat_id(token):
@@ -212,6 +294,8 @@ def main():
     p.add_argument("--feeds-file", default=os.path.join(here, "feeds.txt"))
     p.add_argument("--state", default=os.environ.get("STATE_FILE", os.path.join(here, "state.json")))
     p.add_argument("--loop", type=int, metavar="SECONDS", help="keep running, checking every N seconds")
+    p.add_argument("--bot", type=int, metavar="SECONDS",
+                   help="keep running, check every N seconds, and answer /check in Telegram")
     p.add_argument("--seed", action="store_true",
                    help="on a feed's first check, mark existing entries as seen without notifying")
     p.add_argument("--dry-run", action="store_true", help="print messages instead of sending")
@@ -237,8 +321,13 @@ def main():
     if not feeds:
         p.error("no feeds: pass --feed URL or add URLs to %s" % args.feeds_file)
 
+    if args.bot:
+        # Re-read the feeds file each time so edits apply without a restart.
+        return run_bot(lambda: args.feed or load_feeds(args.feeds_file),
+                       args.state, token, chat_id, args.bot)
     if not args.loop:
-        return 1 if run_once(feeds, args.state, token, chat_id, args.seed, args.dry_run) else 0
+        results = run_once(feeds, args.state, token, chat_id, args.seed, args.dry_run)
+        return 1 if any(error for _, _, _, error in results) else 0
     while True:
         run_once(feeds, args.state, token, chat_id, args.seed, args.dry_run)
         time.sleep(args.loop)

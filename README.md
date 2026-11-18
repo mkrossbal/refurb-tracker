@@ -43,19 +43,30 @@ Sent item IDs are kept in `state.json`, so each item is notified once. Items alr
 
 ### On a Mac in the background (launchd)
 
-Runs every 10 minutes while the Mac is awake, catches up after sleep, and starts again after a restart. Each check uses about 20 MB for under a second.
+`--bot 600` keeps the tracker running: it checks every 10 minutes and answers commands sent to the bot from your chat (messages from other chats are ignored):
+
+- `/check` — check all feeds now and reply with what each one currently lists
+- `/help` — what the bot does
+
+It idles at under 10 MB of memory while waiting for messages. Edits to `feeds.txt` apply on the next check, no restart needed. Run it from launchd so it starts at login and restarts if it crashes:
 
 ```sh
 git clone https://github.com/mkrossbal/refurb-tracker.git ~/refurb-tracker
-# create ~/refurb-tracker/.env with your token and chat ID (see above), then:
+# create ~/refurb-tracker/.env with your token and chat ID (see above), then create
+# ~/Library/LaunchAgents/com.mkrossbal.refurb-tracker.plist running
+#   /usr/bin/python3 -u ~/refurb-tracker/rss_telegram.py --bot 600
+# with KeepAlive=true, and load it:
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mkrossbal.refurb-tracker.plist
 ```
+
+A Mac can't check while it's asleep. To keep a MacBook awake with the lid closed (only do this if it stays plugged in): `sudo pmset -a disablesleep 1`; undo with `sudo pmset -a disablesleep 0`.
 
 The job definition lives at `~/Library/LaunchAgents/com.mkrossbal.refurb-tracker.plist` and output goes to `~/refurb-tracker/tracker.log`.
 
 - Check it's running: `tail ~/refurb-tracker/tracker.log`
 - Stop it: `launchctl bootout gui/$(id -u)/com.mkrossbal.refurb-tracker`
 - Start it again: the `launchctl bootstrap` line above
+- Restart after changing the script: `launchctl kickstart -k gui/$(id -u)/com.mkrossbal.refurb-tracker`
 
 If you run it on a Mac, keep the GitHub Actions workflow disabled (Actions tab → Check feeds → Disable workflow) so you don't get duplicate alerts.
 
