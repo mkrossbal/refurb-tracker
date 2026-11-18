@@ -3,3 +3,6 @@
 
 # 14" MacBook Pro, M5 Pro, 20-core, 64GB, 1TB
 https://refurb-tracker.com/feeds/us_in_macbookpro_macbookair.xml?filter=14%2064gb%20m5%20pro%201tb%2020-core
+
+# 14" MacBook Pro, M5 Pro, 20-core, 48GB, 1TB
+https://refurb-tracker.com/feeds/us_in_macbookpro_macbookair.xml?filter=14%2048gb%20m5%20pro%201tb%2020-core
