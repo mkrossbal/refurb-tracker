@@ -29,6 +29,7 @@ USER_AGENT = "rss-telegram-tracker/1.0"
 MAX_SEEN_PER_FEED = 500
 MAX_PARALLEL_DOWNLOADS = 4
 FEED_TIMEOUT = 10  # seconds to wait for all feeds before giving up
+ALERT_AFTER_FAILURES = 10  # scheduled checks in a row before a "feed down" alert
 
 # Try IPv4 addresses before IPv6. On some home networks IPv6 connections to
 # Telegram hang until the timeout, delaying every message by up to a minute.
@@ -256,6 +257,41 @@ def format_report(results):
     return text
 
 
+def track_health(health, results, scheduled):
+    """Count consecutive failed scheduled checks per feed.
+
+    Returns a message to send when feeds cross ALERT_AFTER_FAILURES or come
+    back after an alert, else None. `health` persists between calls.
+    """
+    failures = health.setdefault("failures", {})
+    alerted = health.setdefault("alerted", set())
+    down, recovered = [], []
+    for url, _, _, error in results:
+        if error:
+            if scheduled:
+                failures[url] = failures.get(url, 0) + 1
+                if failures[url] >= ALERT_AFTER_FAILURES and url not in alerted:
+                    alerted.add(url)
+                    down.append((url, error))
+        else:
+            failures.pop(url, None)
+            if url in alerted:
+                alerted.discard(url)
+                recovered.append(url)
+
+    esc = html.escape
+    parts = []
+    if down:
+        parts.append("⚠️ <b>Feed%s not responding</b>\nFailed %d checks in a row:" % (
+            "s" if len(down) > 1 else "", ALERT_AFTER_FAILURES))
+        parts.extend("• <b>%s</b>: %s" % (esc(feed_label(u)), esc(str(e))) for u, e in down)
+        parts.append("I'll keep trying and tell you when %s back." % ("they're" if len(down) > 1 else "it's"))
+    if recovered:
+        parts.append("%s✅ <b>Back up</b>" % ("\n" if parts else ""))
+        parts.extend("• <b>%s</b>" % esc(feed_label(u)) for u in recovered)
+    return "\n".join(parts) or None
+
+
 BOT_HELP = ("I check your feeds every %d minutes and message you when something new shows up.\n\n"
             "/check - check all feeds now and show what's listed (\"check\" works too)")
 
@@ -268,9 +304,19 @@ def run_bot(get_feeds, state_path, token, chat_id, interval):
     print("%s bot started, checking every %ds" % (time.strftime("%Y-%m-%d %H:%M"), interval))
     offset = None
     next_check = 0
+    health = {}
+
+    def report_health(results, scheduled):
+        alert = track_health(health, results, scheduled)
+        if alert:
+            try:
+                telegram(token, "sendMessage", {"chat_id": chat_id, "text": alert, "parse_mode": "HTML"})
+            except Exception as e:
+                print("error sending health alert: %s" % e, file=sys.stderr)
+
     while True:
         if time.time() >= next_check:
-            run_once(get_feeds(), state_path, token, chat_id, False, False)
+            report_health(run_once(get_feeds(), state_path, token, chat_id, False, False), scheduled=True)
             next_check = time.time() + interval
 
         # Long-poll for messages until the next scheduled check is due.
@@ -297,6 +343,7 @@ def run_bot(get_feeds, state_path, token, chat_id, interval):
             command = words[0].split("@")[0].lower().lstrip("/") if words else ""
             if command == "check":
                 results = run_once(get_feeds(), state_path, token, chat_id, False, False)
+                report_health(results, scheduled=False)
                 reply = format_report(results)
                 next_check = time.time() + interval
             else:

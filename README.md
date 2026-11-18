@@ -48,6 +48,8 @@ Sent item IDs are kept in `state.json`, so each item is notified once. Items alr
 - `/check` — check all feeds now and reply with what each one currently lists
 - `/help` — what the bot does
 
+If a feed fails 10 scheduled checks in a row (about 100 minutes), the bot sends a "not responding" alert, then a "back up" message once it works again. Feeds that don't answer within 10 seconds count as failed.
+
 It idles at under 10 MB of memory while waiting for messages. Edits to `feeds.txt` apply on the next check, no restart needed. Run it from launchd so it starts at login and restarts if it crashes:
 
 ```sh
