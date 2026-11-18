@@ -17,14 +17,17 @@ import os
 import re
 import socket
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 
 ATOM = "{http://www.w3.org/2005/Atom}"
 USER_AGENT = "rss-telegram-tracker/1.0"
 MAX_SEEN_PER_FEED = 500
+MAX_PARALLEL_DOWNLOADS = 4
 
 # Try IPv4 addresses before IPv6. On some home networks IPv6 connections to
 # Telegram hang until the timeout, delaying every message by up to a minute.
@@ -145,8 +148,9 @@ def load_feeds(path):
         return [l.strip() for l in f if l.strip() and not l.lstrip().startswith("#")]
 
 
-def check_feed(url, state, token, chat_id, seed=False, dry_run=False):
-    data = http_get(url)
+def check_feed(url, state, token, chat_id, seed=False, dry_run=False, data=None):
+    if data is None:
+        data = http_get(url)
     root_title = ""
     try:
         root = ET.fromstring(data)
@@ -179,16 +183,21 @@ def run_once(feeds, state_path, token, chat_id, seed, dry_run):
     """Check every feed. Returns a list of (url, entries, new_count, error)."""
     state = load_state(state_path)
     results = []
-    for url in feeds:
-        try:
-            entries, new = check_feed(url, state, token, chat_id, seed=seed, dry_run=dry_run)
-            results.append((url, entries, new, None))
-        except Exception as e:  # keep going with other feeds
-            results.append((url, [], 0, e))
-            print("error checking %s: %s" % (url, e), file=sys.stderr)
-        finally:
-            if not dry_run:
-                save_state(state_path, state)
+    # Download all feeds at once, then process them one at a time so state
+    # updates and notifications stay sequential.
+    with ThreadPoolExecutor(max_workers=MAX_PARALLEL_DOWNLOADS) as pool:
+        downloads = [(url, pool.submit(http_get, url)) for url in feeds]
+        for url, download in downloads:
+            try:
+                entries, new = check_feed(url, state, token, chat_id, seed=seed, dry_run=dry_run,
+                                          data=download.result())
+                results.append((url, entries, new, None))
+            except Exception as e:  # keep going with other feeds
+                results.append((url, [], 0, e))
+                print("error checking %s: %s" % (url, e), file=sys.stderr)
+            finally:
+                if not dry_run:
+                    save_state(state_path, state)
     return results
 
 
@@ -221,6 +230,13 @@ def format_report(results):
             break
         text += line + "\n"
     return text
+
+
+def send_typing(token, chat_id):
+    try:
+        telegram(token, "sendChatAction", {"chat_id": chat_id, "action": "typing"})
+    except Exception as e:
+        print("error sending typing indicator: %s" % e, file=sys.stderr)
 
 
 BOT_HELP = ("I check your feeds every %d minutes and message you when something new shows up.\n\n"
@@ -263,6 +279,8 @@ def run_bot(get_feeds, state_path, token, chat_id, interval):
             words = text.split()
             command = words[0].split("@")[0].lower().lstrip("/") if words else ""
             if command == "check":
+                # Show "typing…" while checking; sent in the background so it doesn't add delay.
+                threading.Thread(target=send_typing, args=(token, chat_id), daemon=True).start()
                 results = run_once(get_feeds(), state_path, token, chat_id, False, False)
                 reply = format_report(results)
                 next_check = time.time() + interval
