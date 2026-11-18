@@ -15,6 +15,7 @@ import html
 import json
 import os
 import re
+import socket
 import sys
 import time
 import urllib.parse
@@ -24,6 +25,17 @@ import xml.etree.ElementTree as ET
 ATOM = "{http://www.w3.org/2005/Atom}"
 USER_AGENT = "rss-telegram-tracker/1.0"
 MAX_SEEN_PER_FEED = 500
+
+# Try IPv4 addresses before IPv6. On some home networks IPv6 connections to
+# Telegram hang until the timeout, delaying every message by up to a minute.
+_getaddrinfo = socket.getaddrinfo
+
+
+def _getaddrinfo_ipv4_first(*args, **kwargs):
+    return sorted(_getaddrinfo(*args, **kwargs), key=lambda info: info[0] != socket.AF_INET)
+
+
+socket.getaddrinfo = _getaddrinfo_ipv4_first
 
 
 def http_get(url, timeout=30):
@@ -212,7 +224,7 @@ def format_report(results):
 
 
 BOT_HELP = ("I check your feeds every %d minutes and message you when something new shows up.\n\n"
-            "/check - check all feeds now and show what's listed")
+            "/check - check all feeds now and show what's listed (\"check\" works too)")
 
 
 def run_bot(get_feeds, state_path, token, chat_id, interval):
@@ -243,21 +255,25 @@ def run_bot(get_feeds, state_path, token, chat_id, interval):
         for u in updates:
             offset = u["update_id"] + 1
             msg = u.get("message") or {}
-            if str(msg.get("chat", {}).get("id")) != str(chat_id):
+            text = msg.get("text") or ""
+            sender = msg.get("chat", {}).get("id")
+            print("%s message from %s: %r" % (time.strftime("%Y-%m-%d %H:%M:%S"), sender, text[:100]))
+            if str(sender) != str(chat_id):
                 continue  # only take commands from the configured chat
-            words = (msg.get("text") or "").split()
-            command = words[0].split("@")[0].lower() if words else ""
-            if command == "/check":
-                print("%s /check requested" % time.strftime("%Y-%m-%d %H:%M"))
+            words = text.split()
+            command = words[0].split("@")[0].lower().lstrip("/") if words else ""
+            if command == "check":
                 results = run_once(get_feeds(), state_path, token, chat_id, False, False)
                 reply = format_report(results)
                 next_check = time.time() + interval
-            elif command in ("/start", "/help"):
-                reply = BOT_HELP % (interval // 60)
             else:
-                continue
-            telegram(token, "sendMessage", {"chat_id": chat_id, "text": reply, "parse_mode": "HTML",
-                                            "disable_web_page_preview": "true"})
+                reply = BOT_HELP % (interval // 60)
+            try:
+                telegram(token, "sendMessage", {"chat_id": chat_id, "text": reply, "parse_mode": "HTML",
+                                                "disable_web_page_preview": "true"})
+                print("%s replied" % time.strftime("%Y-%m-%d %H:%M:%S"))
+            except Exception as e:
+                print("error replying: %s" % e, file=sys.stderr)
 
 
 def get_chat_id(token):
