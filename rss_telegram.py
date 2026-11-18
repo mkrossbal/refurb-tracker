@@ -159,7 +159,7 @@ def check_feed(url, state, token, chat_id, seed=False, dry_run=False):
         seen.append(e["id"])
 
     state[url] = seen[-MAX_SEEN_PER_FEED:]
-    print("%s: %d entries, %d new" % (url, len(entries), len(new)))
+    print("%s %s: %d entries, %d new" % (time.strftime("%Y-%m-%d %H:%M"), url, len(entries), len(new)))
     return len(new)
 
 

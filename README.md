@@ -41,6 +41,24 @@ python3 rss_telegram.py --dry-run    # print what would be sent, don't send or s
 
 Sent item IDs are kept in `state.json`, so each item is notified once. Items already in a feed the first time it is checked **are** sent (for a narrow filter that is usually what you want). Pass `--seed` to mark them as seen silently instead, which is useful for broad feeds.
 
+### On a Mac in the background (launchd)
+
+Runs every 10 minutes while the Mac is awake, catches up after sleep, and starts again after a restart. Each check uses about 20 MB for under a second.
+
+```sh
+git clone https://github.com/mkrossbal/refurb-tracker.git ~/refurb-tracker
+# create ~/refurb-tracker/.env with your token and chat ID (see above), then:
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mkrossbal.refurb-tracker.plist
+```
+
+The job definition lives at `~/Library/LaunchAgents/com.mkrossbal.refurb-tracker.plist` and output goes to `~/refurb-tracker/tracker.log`.
+
+- Check it's running: `tail ~/refurb-tracker/tracker.log`
+- Stop it: `launchctl bootout gui/$(id -u)/com.mkrossbal.refurb-tracker`
+- Start it again: the `launchctl bootstrap` line above
+
+If you run it on a Mac, keep the GitHub Actions workflow disabled (Actions tab → Check feeds → Disable workflow) so you don't get duplicate alerts.
+
 ### Always-on with GitHub Actions
 
 `.github/workflows/check-feeds.yml` runs the check every 10 minutes for free on GitHub:
@@ -49,7 +67,7 @@ Sent item IDs are kept in `state.json`, so each item is notified once. Items alr
 2. Add repository secrets `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` (Settings → Secrets and variables → Actions).
 3. Trigger it once from the Actions tab (Run workflow) to confirm it works.
 
-GitHub can delay scheduled runs, and it pauses schedules on repos with no activity for 60 days.
+GitHub can delay scheduled runs by hours on free accounts, and it pauses schedules on repos with no activity for 60 days.
 
 ### Locally with cron
 
